@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import quote
+
+from aiohttp import encode_basic_auth
+
+_PLAINTEXT_SCHEMES = frozenset({"http", "socks5", "socks5h"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -13,17 +18,42 @@ class ResolvedProxyEndpoint:
     username: str | None = None
     password: str | None = None
 
+    def _reject_plaintext_credentials(self) -> None:
+        if self.scheme.lower() in _PLAINTEXT_SCHEMES and (self.username is not None or self.password is not None):
+            raise ValueError("credential-bearing plaintext proxy URLs are forbidden")
+
     @property
     def proxy_url(self) -> str:
-        if self.scheme.lower() in {"http", "socks5", "socks5h"} and (
-            self.username is not None or self.password is not None
-        ):
-            raise ValueError("credential-bearing plaintext proxy URLs are forbidden")
+        self._reject_plaintext_credentials()
         scheme = "socks5h" if self.scheme == "socks5" else self.scheme
         auth = ""
         if self.username:
             auth = f"{quote(self.username, safe='')}:{quote(self.password or '', safe='')}@"
         return f"{scheme}://{auth}{self.host}:{self.port}"
+
+    @property
+    def proxy_url_without_credentials(self) -> str:
+        scheme = "socks5h" if self.scheme == "socks5" else self.scheme
+        return f"{scheme}://{self.host}:{self.port}"
+
+    def aiohttp_proxy_kwargs(self) -> dict[str, Any]:
+        """Return ``proxy``/``proxy_headers`` kwargs for aiohttp request and ws_connect.
+
+        Credentials travel in a ``Proxy-Authorization`` header instead of URL
+        userinfo so aiohttp's ``ConnectionKey``/``Connection`` reprs and
+        ``ClientHttpProxyError.__str__`` never carry the password. ``latin1``
+        matches aiohttp's own userinfo encoding (``BasicAuth`` default), so the
+        CONNECT header stays byte-identical. aiohttp forwards ``proxy_headers``
+        only on the CONNECT tunnel request, i.e. for TLS (``https``/``wss``)
+        targets; callers must not use these kwargs for plaintext targets.
+        """
+        self._reject_plaintext_credentials()
+        kwargs: dict[str, Any] = {"proxy": self.proxy_url_without_credentials}
+        if self.username:
+            kwargs["proxy_headers"] = {
+                "Proxy-Authorization": encode_basic_auth(self.username, self.password or "", encoding="latin1"),
+            }
+        return kwargs
 
 
 @dataclass(frozen=True, slots=True)

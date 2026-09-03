@@ -28,7 +28,8 @@ from app.core.resilience.network_recovery import (
 )
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 
-_RESERVED = frozenset({"akamai", "extra_fp", "impersonate", "ja3", "proxies", "proxy"})
+_RESERVED = frozenset({"akamai", "extra_fp", "impersonate", "ja3", "proxies", "proxy", "proxy_headers"})
+_TLS_TARGET_SCHEMES = frozenset({"https", "wss"})
 _CODEX_SKIP_AUTO_IDENTITY_HEADERS = frozenset({aiohttp.hdrs.ACCEPT, aiohttp.hdrs.ACCEPT_ENCODING})
 
 
@@ -256,7 +257,7 @@ class CodexClient:
                         response = await self._session.request(
                             method,
                             url,
-                            proxy=endpoint.proxy_url,
+                            **_aiohttp_proxy_kwargs(endpoint, url),
                             **aiohttp_kwargs,
                         )
                     except Exception as exc:
@@ -309,7 +310,7 @@ class CodexClient:
         if route is None:
             raise ValueError("Codex upstream calls require a resolved upstream proxy route")
         _reject_reserved(kwargs)
-        result = self._session.ws_connect(url, proxy=route.proxy_url, **kwargs)
+        result = self._session.ws_connect(url, **_aiohttp_proxy_kwargs(route.endpoint, url), **kwargs)
         if asyncio.iscoroutine(result):
             return await result
         return result
@@ -359,7 +360,7 @@ class CodexClient:
                 else:
                     context = self._session.ws_connect(
                         url,
-                        proxy=endpoint.proxy_url,
+                        **_aiohttp_proxy_kwargs(endpoint, url),
                         **kwargs,
                     )
                     if asyncio.iscoroutine(context):
@@ -813,6 +814,16 @@ async def _read_response_body(response: Any) -> bytes | None:
 def _response_status(response: Any) -> int:
     value = getattr(response, "status", getattr(response, "status_code", 0))
     return int(value or 0)
+
+
+def _aiohttp_proxy_kwargs(endpoint: ResolvedProxyEndpoint, url: str) -> dict[str, Any]:
+    # Proxy credentials ride in a Proxy-Authorization header (never URL
+    # userinfo, which aiohttp reprs into ConnectionKey/ClientHttpProxyError).
+    # aiohttp only forwards proxy_headers on the CONNECT tunnel, so a
+    # credentialed endpoint requires a TLS target; fail closed otherwise.
+    if endpoint.username and URL(url).scheme not in _TLS_TARGET_SCHEMES:
+        raise ValueError("credentialed aiohttp proxy routes require an https/wss upstream target")
+    return endpoint.aiohttp_proxy_kwargs()
 
 
 def _reject_reserved(kwargs: Mapping[str, Any]) -> None:

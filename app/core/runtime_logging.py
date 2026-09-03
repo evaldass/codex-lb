@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import logging
@@ -7,7 +8,7 @@ import re
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import cast
+from typing import Any, cast
 
 from fastapi import Request
 from uvicorn.config import LOGGING_CONFIG
@@ -25,6 +26,23 @@ _JSON_SENSITIVE_LOG_VALUE_PATTERN = re.compile(
     r'(?i)("(?:password|passwd|pwd|token|secret|api[_-]?key|authorization)"\s*:\s*")'
     r'(?:\\.|[^"\\])*(")'
 )
+# ``scheme://user:pass@`` userinfo, e.g. aiohttp ConnectionKey proxy URL reprs.
+_USERINFO_PATTERN = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/\s@'\"]+)@")
+# Case-folded substrings that must be present before the keyed/bearer/
+# authorization/JSON patterns above can match; keeps the per-record cost of
+# credential-free lines to a casefold plus substring scans.
+_SECRET_HINTS = (
+    "password",
+    "passwd",
+    "pwd",
+    "token",
+    "secret",
+    "api_key",
+    "api-key",
+    "apikey",
+    "bearer",
+    "authorization",
+)
 _LOG_REDACTION = "[REDACTED]"
 
 
@@ -32,11 +50,47 @@ def _redact_log_value(value: str | None) -> str | None:
     collapsed = _collapse_log_value(value)
     if collapsed is None:
         return None
-    redacted = collapsed
-    redacted = _JSON_SENSITIVE_LOG_VALUE_PATTERN.sub(_redact_json_secret, redacted)
+    return _redact_secret_patterns(_USERINFO_PATTERN.sub(_redact_userinfo, collapsed))
+
+
+def _redact_secret_patterns(text: str) -> str:
+    redacted = _JSON_SENSITIVE_LOG_VALUE_PATTERN.sub(_redact_json_secret, text)
     redacted = _SENSITIVE_LOG_VALUE_PATTERNS[0].sub(_redact_keyed_secret, redacted)
     redacted = _SENSITIVE_LOG_VALUE_PATTERNS[1].sub(_redact_bearer_token, redacted)
     return _SENSITIVE_LOG_VALUE_PATTERNS[2].sub(_redact_authorization_value, redacted)
+
+
+def redact_rendered_log_text(text: str, *, keyed_secrets: bool = True) -> str:
+    """Mask URL userinfo (and, optionally, keyed secrets) in a rendered log string.
+
+    Applied to every rendered record regardless of the originating logger
+    (asyncio, aiohttp, uvicorn, tracebacks). ``keyed_secrets=False`` limits the
+    pass to the O(1)-precheck userinfo pattern; formatters use it for INFO and
+    lower records because the keyed patterns cost tens of microseconds on long
+    hot-path lines. Never raises: any failure returns the input unchanged so
+    logging itself cannot break.
+    """
+    try:
+        redacted = text
+        if "@" in text and "://" in text:
+            redacted = _USERINFO_PATTERN.sub(_redact_userinfo, redacted)
+        if not keyed_secrets:
+            return redacted
+        folded = text.casefold()
+        for hint in _SECRET_HINTS:
+            if hint in folded:
+                return _redact_secret_patterns(redacted)
+        return redacted
+    except Exception:
+        return text
+
+
+def _redact_record_text(record: logging.LogRecord, text: str) -> str:
+    return redact_rendered_log_text(text, keyed_secrets=record.levelno >= logging.WARNING)
+
+
+def _redact_userinfo(match: re.Match[str]) -> str:
+    return f"{match.group(1)}{_LOG_REDACTION}@"
 
 
 def _redact_keyed_secret(match: re.Match[str]) -> str:
@@ -59,12 +113,29 @@ def _utc_converter(seconds: float | None) -> time.struct_time:
     return time.gmtime(seconds)
 
 
-class UtcDefaultFormatter(DefaultFormatter):
+class _RedactingFormatterMixin(logging.Formatter):
+    """Redact the fully rendered record (message, exception text, stack info)."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return _redact_record_text(record, super().format(record))
+
+
+class UtcDefaultFormatter(_RedactingFormatterMixin, DefaultFormatter):
     converter: Callable[[float | None], time.struct_time] = staticmethod(_utc_converter)
 
 
-class UtcAccessFormatter(AccessFormatter):
+class UtcAccessFormatter(_RedactingFormatterMixin, AccessFormatter):
     converter: Callable[[float | None], time.struct_time] = staticmethod(_utc_converter)
+
+
+def _redact_json_log_value(record: logging.LogRecord, value: object) -> object:
+    if isinstance(value, str):
+        return _redact_record_text(record, value)
+    if isinstance(value, dict):
+        return {key: _redact_json_log_value(record, item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_json_log_value(record, item) for item in value]
+    return value
 
 
 class JsonFormatter(logging.Formatter):
@@ -76,7 +147,7 @@ class JsonFormatter(logging.Formatter):
             "timestamp": datetime.now(UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": _redact_record_text(record, record.getMessage()),
         }
 
         try:
@@ -120,12 +191,12 @@ class JsonFormatter(logging.Formatter):
             if key not in excluded_keys:
                 try:
                     json.dumps(value)
-                    log_entry[key] = value
+                    log_entry[key] = _redact_json_log_value(record, value)
                 except (TypeError, ValueError):
-                    log_entry[key] = str(value)
+                    log_entry[key] = _redact_record_text(record, str(value))
 
         if record.exc_info:
-            log_entry["exception"] = self.formatException(record.exc_info)
+            log_entry["exception"] = _redact_record_text(record, self.formatException(record.exc_info))
 
         return json.dumps(log_entry, default=str)
 
@@ -138,7 +209,7 @@ class JsonAccessFormatter(logging.Formatter):
             "logger": record.name,
             "type": "access",
             "client": getattr(record, "client_addr", None),
-            "request": getattr(record, "request_line", None),
+            "request": cast(JsonValue, _redact_json_log_value(record, getattr(record, "request_line", None))),
             "status": getattr(record, "status_code", None),
         }
         return json.dumps(log_entry, default=str)
@@ -191,6 +262,65 @@ def build_log_config() -> LogConfig:
         "level": "INFO",
     }
     return cast(LogConfig, config)
+
+
+class _RedactedRepr:
+    """Stand-in whose repr is the redacted rendering of the original object."""
+
+    __slots__ = ("_text",)
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def __repr__(self) -> str:
+        return self._text
+
+
+# Context values the default handler renders as text rather than repr().
+_UNREDACTED_LOOP_CONTEXT_KEYS = frozenset({"message", "exception", "source_traceback", "handle_traceback"})
+_REDACTING_LOOP_HANDLER_MARKER = "_codex_lb_redacting_loop_handler"
+
+
+def install_redacting_loop_exception_handler(loop: asyncio.AbstractEventLoop) -> None:
+    """Redact credential-bearing object reprs before the loop's default handler logs them.
+
+    The default asyncio/uvloop handler renders every context value with
+    ``repr()`` (aiohttp ``Connection<ConnectionKey(... proxy=URL('http://u:pw@host'))>``,
+    ``BasicAuth(... password='pw')``) into the ``asyncio`` logger before any
+    formatter runs. Idempotent; delegates to the previously installed handler
+    (or the default one) so formatting stays byte-identical for contexts that
+    contain no secrets, and falls back to the raw context on any failure.
+    """
+    previous = loop.get_exception_handler()
+    if previous is not None and getattr(previous, _REDACTING_LOOP_HANDLER_MARKER, False):
+        return
+
+    def _delegate(target_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        if previous is None:
+            target_loop.default_exception_handler(context)
+        else:
+            previous(target_loop, context)
+
+    def _handler(target_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        try:
+            safe_context = dict(context)
+            for key, value in context.items():
+                if key in _UNREDACTED_LOOP_CONTEXT_KEYS:
+                    continue
+                try:
+                    rendered = repr(value)
+                except Exception:
+                    continue
+                redacted = redact_rendered_log_text(rendered)
+                if redacted != rendered:
+                    safe_context[key] = _RedactedRepr(redacted)
+        except Exception:
+            _delegate(target_loop, context)
+            return
+        _delegate(target_loop, safe_context)
+
+    setattr(_handler, _REDACTING_LOOP_HANDLER_MARKER, True)
+    loop.set_exception_handler(_handler)
 
 
 def log_error_response(
