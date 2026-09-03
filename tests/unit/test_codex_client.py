@@ -373,15 +373,18 @@ async def test_credentialed_route_requires_tls_target_for_request(route: Resolve
     # aiohttp forwards proxy_headers only on the CONNECT tunnel, so a plaintext
     # target would silently drop the proxy credentials; fail closed before any
     # dispatch. The idempotent GET must not slip through the credential-free
-    # fallback endpoint either (the route fixture carries one).
+    # fallback endpoint either (the route fixture carries one). Surfaces as a
+    # connect-phase transport error so callers answer upstream-unavailable.
     session = _Session()
     client = CodexClient(session)
 
-    with pytest.raises(ValueError, match="https/wss upstream target") as exc_info:
+    with pytest.raises(CodexTransportError, match="https/wss upstream target") as exc_info:
         await client.request(method, "http://upstream.test", route=route, json={"x": 1})
 
     assert session.calls == []
     assert "proxy.test" not in str(exc_info.value)
+    assert exc_info.value.failure_phase == "connect"
+    assert exc_info.value.retryable_same_contract is False
 
 
 @pytest.mark.asyncio
@@ -389,7 +392,7 @@ async def test_credentialed_route_requires_tls_target_for_ws_connect(route: Reso
     session = _Session()
     client = CodexClient(session)
 
-    with pytest.raises(ValueError, match="https/wss upstream target"):
+    with pytest.raises(CodexTransportError, match="https/wss upstream target"):
         await client.ws_connect("ws://upstream.test", route=route)
 
     assert session.calls == []
@@ -400,7 +403,7 @@ async def test_credentialed_route_requires_tls_target_for_ws_open_with_fallback(
     session = _Session()
     client = CodexClient(session)
 
-    with pytest.raises(ValueError, match="https/wss upstream target"):
+    with pytest.raises(CodexTransportError, match="https/wss upstream target"):
         await client.open_ws_with_route_metadata("ws://upstream.test", route=route)
 
     assert session.calls == []

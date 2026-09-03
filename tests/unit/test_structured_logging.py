@@ -550,3 +550,117 @@ def test_redact_rendered_log_text_still_masks_userinfo_before_query():
     line = "probe " + runtime_basic_auth_url("u", "QUERYPW", "h") + "?next=ops@example.com"
 
     assert runtime_logging.redact_rendered_log_text(line) == "probe http://[REDACTED]@h?next=ops@example.com"
+
+
+def _client_http_proxy_error(password: str, loop=None):
+    # Exact aiohttp shape for a rejected CONNECT: the tunnel request's headers
+    # (our Proxy-Authorization) ride in request_info and are rendered by
+    # repr(exc); str(exc) and tracebacks stay credential-free.
+    import asyncio
+
+    import aiohttp
+    from aiohttp.client_reqrep import ClientRequest
+    from yarl import URL
+
+    from app.core.upstream_proxy import ResolvedProxyEndpoint
+
+    endpoint = ResolvedProxyEndpoint("ep", "https", "proxy.test", 8080, "smart-user", password)
+    proxy_headers = endpoint.aiohttp_proxy_kwargs()["proxy_headers"]
+    owned_loop = loop is None
+    loop = loop or asyncio.new_event_loop()
+    try:
+        request = ClientRequest("CONNECT", URL("https://chatgpt.com/"), headers=proxy_headers, loop=loop)
+    finally:
+        if owned_loop:
+            loop.close()
+    return aiohttp.ClientHttpProxyError(request.request_info, (), status=502, message="nope")
+
+
+def _basic_token(username: str, password: str) -> str:
+    import base64
+
+    return base64.b64encode(f"{username}:{password}".encode()).decode()
+
+
+@pytest.mark.parametrize("log_format", ["text", "json"])
+@pytest.mark.parametrize("level", [logging.INFO, logging.ERROR])
+def test_rendered_client_http_proxy_error_repr_redacts_basic_token(monkeypatch, log_format, level):
+    exc = _client_http_proxy_error("SECRETPW")
+    token = _basic_token("smart-user", "SECRETPW")
+    assert token in repr(exc)
+    assert token not in str(exc)
+    record = logging.LogRecord("aiohttp.client", level, "connector.py", 1, "proxy failure: %r", (exc,), None)
+
+    output = _render(_formatter_from_config(monkeypatch, log_format), record)
+
+    assert token not in output
+    assert "SECRETPW" not in output
+    assert "'Proxy-Authorization': 'Basic [REDACTED]'" in output
+    assert "real_url=URL('https://chatgpt.com/')" in output
+
+
+def test_redact_log_value_masks_basic_token_in_proxy_error_repr():
+    exc = _client_http_proxy_error("SECRETPW")
+
+    redacted = _redact_log_value(repr(exc))
+
+    assert redacted is not None
+    assert _basic_token("smart-user", "SECRETPW") not in redacted
+    assert "'Basic [REDACTED]'" in redacted
+
+
+def test_basic_token_redaction_without_keyed_secrets_requires_canonical_scheme_case():
+    token = _basic_token("user", "pass")
+    canonical = f"headers ('Proxy-Authorization': 'Basic {token}')"
+    lowercase = f"headers ('Proxy-Authorization': 'basic {token}')"
+
+    assert runtime_logging.redact_rendered_log_text(canonical, keyed_secrets=False) == (
+        "headers ('Proxy-Authorization': 'Basic [REDACTED]')"
+    )
+    # INFO-level records only pay for the canonical spelling aiohttp emits.
+    assert runtime_logging.redact_rendered_log_text(lowercase, keyed_secrets=False) == lowercase
+    assert runtime_logging.redact_rendered_log_text(lowercase) == "headers ('Proxy-Authorization': 'basic [REDACTED]')"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(["PW1", "PW2"], id="list"),
+        pytest.param(123456, id="int"),
+        pytest.param(b"PWBYTES", id="bytes"),
+        pytest.param({"nested": "PWNESTED"}, id="dict"),
+    ],
+)
+def test_json_formatter_redacts_non_string_values_under_secret_keys(json_formatter, value):
+    record = _record("proxy auth failed", level=logging.WARNING, name="app.core.clients.codex")
+    record.password = value
+    record.details = {"token": value, "attempt": 3}
+
+    parsed = json.loads(json_formatter.format(record))
+
+    assert parsed["password"] == "[REDACTED]"
+    assert parsed["details"] == {"token": "[REDACTED]", "attempt": 3}
+    assert "PW" not in json.dumps(parsed).replace("[REDACTED]", "")
+
+
+def test_json_formatter_keeps_null_under_secret_keys(json_formatter):
+    record = _record("proxy auth failed", level=logging.WARNING, name="app.core.clients.codex")
+    record.password = None
+
+    parsed = json.loads(json_formatter.format(record))
+
+    assert parsed["password"] is None
+
+
+def test_json_formatter_redacts_userinfo_in_extra_keys(json_formatter):
+    # Keys are rendered too; the cheap userinfo pass applies at every level.
+    record = _record("proxy failure", level=logging.INFO, name="app.core.clients.codex")
+    record.details = {runtime_basic_auth_url("u", "PWKEY", "proxy.test:1"): "failed"}
+    record.__dict__[runtime_basic_auth_url("u", "PWTOP", "proxy.test:2")] = "failed"
+
+    parsed = json.loads(json_formatter.format(record))
+
+    assert parsed["details"] == {"http://[REDACTED]@proxy.test:1": "failed"}
+    assert parsed["http://[REDACTED]@proxy.test:2"] == "failed"
+    assert "PWKEY" not in json.dumps(parsed)
+    assert "PWTOP" not in json.dumps(parsed)

@@ -10,9 +10,9 @@ _PLAINTEXT_SCHEMES = frozenset({"http", "socks5", "socks5h"})
 
 def _encode_basic_proxy_auth(username: str, password: str) -> str:
     # RFC 7617 Basic token encoded with latin1, byte-identical to the header
-    # aiohttp derives from URL userinfo (``BasicAuth`` default encoding), so
-    # the CONNECT request is unchanged. Local so the declared ``aiohttp>=3.13``
-    # floor holds (``aiohttp.encode_basic_auth`` only exists in 3.14+).
+    # value aiohttp derives from URL userinfo (``BasicAuth`` default encoding);
+    # the CONNECT request differs only in header order. Local so the declared
+    # ``aiohttp>=3.13`` floor holds (``aiohttp.encode_basic_auth`` is 3.14+).
     if ":" in username:
         raise ValueError("proxy usernames cannot contain ':'")
     token = base64.b64encode(f"{username}:{password}".encode("latin1")).decode("ascii")
@@ -53,7 +53,9 @@ class ResolvedProxyEndpoint:
         userinfo so aiohttp's ``ConnectionKey``/``Connection`` reprs and
         ``ClientHttpProxyError.__str__`` never carry the password. ``latin1``
         matches aiohttp's own userinfo encoding (``BasicAuth`` default), so the
-        CONNECT header stays byte-identical. aiohttp forwards ``proxy_headers``
+        CONNECT ``Proxy-Authorization`` value stays byte-identical (aiohttp
+        emits it right after ``Host`` instead of last, which no proxy
+        observes). aiohttp forwards ``proxy_headers``
         only on the CONNECT tunnel request, i.e. for TLS (``https``/``wss``)
         targets; callers must not use these kwargs for plaintext targets.
         """

@@ -22,6 +22,12 @@ _SENSITIVE_LOG_VALUE_PATTERNS = (
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+"),
     re.compile(r"(?i)(authorization\s*[=:]\s*)(?!\s*bearer\b)([^,&]+)"),
 )
+# RFC 7617 ``Basic <base64>`` token: a reversible encoding of ``user:password``
+# that aiohttp reprs verbatim (``ClientHttpProxyError.request_info.headers``
+# carries the CONNECT ``Proxy-Authorization`` header). Applied to every record
+# behind a case-sensitive scan for the canonical scheme spelling.
+_BASIC_TOKEN_PATTERN = re.compile(r"(?i)(basic\s+)[A-Za-z0-9+/=]+")
+_BASIC_TOKEN_PRECHECK = "Basic "
 _JSON_SENSITIVE_LOG_VALUE_PATTERN = re.compile(
     r'(?i)("(?:password|passwd|pwd|token|secret|api[_-]?key|authorization)"\s*:\s*")'
     r'(?:\\.|[^"\\])*(")'
@@ -45,6 +51,7 @@ _SECRET_HINTS = (
     "api-key",
     "apikey",
     "bearer",
+    "basic",
     "authorization",
 )
 _LOG_REDACTION = "[REDACTED]"
@@ -61,23 +68,27 @@ def _redact_secret_patterns(text: str) -> str:
     redacted = _JSON_SENSITIVE_LOG_VALUE_PATTERN.sub(_redact_json_secret, text)
     redacted = _SENSITIVE_LOG_VALUE_PATTERNS[0].sub(_redact_keyed_secret, redacted)
     redacted = _SENSITIVE_LOG_VALUE_PATTERNS[1].sub(_redact_bearer_token, redacted)
+    redacted = _BASIC_TOKEN_PATTERN.sub(_redact_bearer_token, redacted)
     return _SENSITIVE_LOG_VALUE_PATTERNS[2].sub(_redact_authorization_value, redacted)
 
 
 def redact_rendered_log_text(text: str, *, keyed_secrets: bool = True) -> str:
-    """Mask URL userinfo (and, optionally, keyed secrets) in a rendered log string.
+    """Mask URL userinfo, Basic tokens and, optionally, keyed secrets in a rendered log string.
 
     Applied to every rendered record regardless of the originating logger
     (asyncio, aiohttp, uvicorn, tracebacks). ``keyed_secrets=False`` limits the
-    pass to the O(1)-precheck userinfo pattern; formatters use it for INFO and
-    lower records because the keyed patterns cost tens of microseconds on long
-    hot-path lines. Never raises: any failure returns the input unchanged so
-    logging itself cannot break.
+    pass to the substring-precheck patterns (URL userinfo and canonical
+    ``Basic <token>``); formatters use it for INFO and lower records because the
+    keyed patterns cost tens of microseconds on long hot-path lines. Never
+    raises: any failure returns the input unchanged so logging itself cannot
+    break.
     """
     try:
         redacted = text
         if "@" in text and "://" in text:
             redacted = _USERINFO_PATTERN.sub(_redact_userinfo, redacted)
+        if _BASIC_TOKEN_PRECHECK in text:
+            redacted = _BASIC_TOKEN_PATTERN.sub(_redact_bearer_token, redacted)
         if not keyed_secrets:
             return redacted
         folded = text.casefold()
@@ -136,21 +147,28 @@ def _redact_json_log_value(record: logging.LogRecord, value: object) -> object:
     if isinstance(value, str):
         return _redact_record_text(record, value)
     if isinstance(value, dict):
-        return {key: _redact_json_log_item(record, key, item) for key, item in value.items()}
+        return {
+            _redact_json_log_key(record, key): _redact_json_log_item(record, key, item) for key, item in value.items()
+        }
     if isinstance(value, (list, tuple)):
         return [_redact_json_log_value(record, item) for item in value]
     return value
 
 
+def _redact_json_log_key(record: logging.LogRecord, key: object) -> object:
+    # Keys are rendered too (``{"https://u:pw@proxy": "failed"}``).
+    return _redact_record_text(record, key) if isinstance(key, str) else key
+
+
+def _is_secret_json_log_key(record: logging.LogRecord, key: object) -> bool:
+    # Key-aware for WARNING+ like the keyed text patterns: ``{"password": x}``
+    # carries the secret in a value the value-only pass cannot recognise,
+    # whatever its type (string, list, number, bytes).
+    return record.levelno >= logging.WARNING and isinstance(key, str) and bool(_SENSITIVE_LOG_KEY_PATTERN.search(key))
+
+
 def _redact_json_log_item(record: logging.LogRecord, key: object, value: object) -> object:
-    # Key-aware for WARNING+ like the keyed text patterns: ``{"password": "x"}``
-    # carries the secret in a value the value-only pass cannot recognise.
-    if (
-        record.levelno >= logging.WARNING
-        and isinstance(value, str)
-        and isinstance(key, str)
-        and _SENSITIVE_LOG_KEY_PATTERN.search(key)
-    ):
+    if value is not None and _is_secret_json_log_key(record, key):
         return _LOG_REDACTION
     return _redact_json_log_value(record, value)
 
@@ -205,12 +223,20 @@ class JsonFormatter(logging.Formatter):
         }
 
         for key, value in record.__dict__.items():
-            if key not in excluded_keys:
-                try:
-                    json.dumps(value)
-                    log_entry[key] = _redact_json_log_item(record, key, value)
-                except (TypeError, ValueError):
-                    log_entry[key] = _redact_record_text(record, str(value))
+            if key in excluded_keys:
+                continue
+            safe_key = str(_redact_json_log_key(record, key))
+            if value is not None and _is_secret_json_log_key(record, key):
+                log_entry[safe_key] = _LOG_REDACTION
+                continue
+            # Rebuild containers key-aware first so a non-serializable leaf
+            # (bytes) cannot drag secret-keyed siblings into the str() fallback.
+            redacted = _redact_json_log_value(record, value)
+            try:
+                json.dumps(redacted)
+                log_entry[safe_key] = redacted
+            except (TypeError, ValueError):
+                log_entry[safe_key] = _redact_record_text(record, str(redacted))
 
         if record.exc_info:
             log_entry["exception"] = _redact_record_text(record, self.formatException(record.exc_info))

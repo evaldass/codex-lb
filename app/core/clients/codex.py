@@ -824,10 +824,16 @@ def _reject_credentialed_plaintext_target(url: str, endpoints: tuple[ResolvedPro
     # userinfo, which aiohttp reprs into ConnectionKey/ClientHttpProxyError).
     # aiohttp only forwards proxy_headers on the CONNECT tunnel, so a
     # credentialed endpoint requires a TLS target. Checked once for the whole
-    # ordered pool before any dispatch so a credential-free fallback cannot
-    # quietly absorb a misconfigured primary.
+    # ordered pool, ahead of every transport branch and before any dispatch,
+    # so a credential-free fallback cannot quietly absorb a misconfigured
+    # primary. Raised as a connect-phase transport error so callers map it to
+    # the usual upstream-unavailable response instead of an unhandled failure.
     if any(endpoint.username for endpoint in endpoints) and URL(url).scheme not in _TLS_TARGET_SCHEMES:
-        raise ValueError("credentialed aiohttp proxy routes require an https/wss upstream target")
+        raise CodexTransportError(
+            "credentialed aiohttp proxy routes require an https/wss upstream target",
+            failure_phase="connect",
+            retryable_same_contract=False,
+        )
 
 
 def _reject_reserved(kwargs: Mapping[str, Any]) -> None:

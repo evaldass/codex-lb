@@ -4,12 +4,16 @@
 
 Every log record rendered by the application's text, access, and JSON
 formatters MUST have `scheme://user:password@` URL userinfo replaced with
-`scheme://[REDACTED]@`, regardless of the originating logger (application,
-`asyncio`, aiohttp, uvicorn) and including exception and stack text. Records
-at WARNING level or higher MUST additionally have keyed secrets
-(`password=`, `token=`, `api_key=`, bearer and authorization values, JSON
+`scheme://[REDACTED]@` and canonical `Basic <token>` authorization tokens
+(a reversible encoding of `user:password`, as carried in aiohttp proxy-error
+reprs) replaced with `Basic [REDACTED]`, regardless of the originating logger
+(application, `asyncio`, aiohttp, uvicorn) and including exception and stack
+text. Structured extra keys MUST be redacted like values. Records at WARNING
+level or higher MUST additionally have keyed secrets (`password=`, `token=`,
+`api_key=`, bearer, basic and authorization values in any letter case, JSON
 secret fields embedded in strings, and structured extra fields whose key names
-a secret) redacted. Redaction MUST never raise; on failure the record is
+a secret, whatever the value type) redacted. Redaction MUST never raise; on
+failure the record is
 emitted unchanged. Application startup MUST install an asyncio loop exception
 handler that redacts the `repr()` of context values before the default
 handler logs them, MUST leave secret-free context output byte-identical to
@@ -24,12 +28,20 @@ byte-identically to the unredacted rendering.
 - **THEN** the rendered record contains `proxy=URL('scheme://[REDACTED]@host:port')`
 - **AND** the password appears in neither the text nor the JSON rendering
 
+#### Scenario: Proxy error repr with a Basic token is masked
+
+- **GIVEN** an aiohttp proxy error whose tunnel request headers carry `Proxy-Authorization: Basic <token>`
+- **WHEN** the error is logged with `%r` at any level, or its repr reaches the loop exception handler through an unretrieved task
+- **THEN** the rendered record contains `'Proxy-Authorization': 'Basic [REDACTED]'`
+- **AND** neither the token nor the password appears in the text or JSON rendering
+
 #### Scenario: Secret-keyed structured extras are masked
 
 - **GIVEN** a WARNING or higher record carries an extra field such as `{"password": "..."}` or `{"access_token": "..."}`
 - **WHEN** the JSON formatter renders the record
-- **THEN** the field value is replaced with `[REDACTED]`
+- **THEN** the field value is replaced with `[REDACTED]` whatever its type (string, list, number, bytes, mapping); a null value stays null
 - **AND** fields such as `attempt` or `tokens` keep their values
+- **AND** an extra key carrying URL userinfo is rendered as `scheme://[REDACTED]@host`
 
 #### Scenario: Secret-free records are unchanged
 

@@ -145,3 +145,44 @@ def test_unretrieved_task_exception_repr_is_redacted(loop_factory, asyncio_log) 
     assert messages, asyncio_log.messages
     assert all("TASKPW" not in message for message in messages)
     assert any("http://[REDACTED]@h/" in message for message in messages)
+
+
+@pytest.mark.parametrize("loop_factory", _LOOP_FACTORIES)
+def test_unretrieved_task_client_http_proxy_error_repr_is_redacted(loop_factory, asyncio_log) -> None:
+    # Task repr embeds repr(exception); aiohttp's ClientHttpProxyError repr
+    # carries the CONNECT Proxy-Authorization header, a reversible Basic token.
+    import base64
+
+    import aiohttp
+    from aiohttp.client_reqrep import ClientRequest
+    from yarl import URL
+
+    from app.core.upstream_proxy import ResolvedProxyEndpoint
+
+    token = base64.b64encode(b"smart-user:SECRETPW").decode()
+
+    async def _main() -> None:
+        running = asyncio.get_running_loop()
+        install_redacting_loop_exception_handler(running)
+        endpoint = ResolvedProxyEndpoint("ep", "https", "proxy.test", 8080, "smart-user", "SECRETPW")
+        proxy_headers = endpoint.aiohttp_proxy_kwargs()["proxy_headers"]
+
+        async def _boom() -> None:
+            request = ClientRequest("CONNECT", URL("https://chatgpt.com/"), headers=proxy_headers, loop=running)
+            raise aiohttp.ClientHttpProxyError(request.request_info, (), status=502, message="nope")
+
+        task = running.create_task(_boom())
+        await asyncio.sleep(0)
+        assert task.done()
+        assert token in repr(task)
+        del task
+        gc.collect()
+        await asyncio.sleep(0)
+
+    with asyncio.Runner(loop_factory=loop_factory) as runner:
+        runner.run(_main())
+
+    messages = [message for message in asyncio_log.messages if "Task exception was never retrieved" in message]
+    assert messages, asyncio_log.messages
+    assert all(token not in message and "SECRETPW" not in message for message in messages)
+    assert any("'Proxy-Authorization': 'Basic [REDACTED]'" in message for message in messages)

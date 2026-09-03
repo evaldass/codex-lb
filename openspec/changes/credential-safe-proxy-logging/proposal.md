@@ -18,14 +18,19 @@ clients under the Responses policy.
   aiohttp repr surfaces never contain the password. Credentialed aiohttp routes
   require a TLS (`https`/`wss`) upstream target because aiohttp forwards proxy
   headers only on the CONNECT tunnel; plaintext targets fail closed for the
-  whole ordered pool before any dispatch. The resolver rejects usernames
+  whole ordered pool before any dispatch and ahead of every transport branch
+  (native egress and SOCKS included), as a connect-phase transport error that
+  callers map to the usual upstream-unavailable response. The resolver rejects usernames
   containing `:` (not encodable as Basic credentials); the dashboard rejects
   them at creation and the endpoint test route reports the resolver reason.
   Native egress and SOCKS transports keep their existing fields.
 - Every rendered log record (text and JSON formatters, any logger) masks
-  `scheme://user:pass@` userinfo; WARNING-and-higher records additionally get
-  the existing keyed/bearer/authorization/JSON secret patterns and secret-keyed
-  structured extras (`password`, `*_token`, `api_key`, ...). Redaction never
+  `scheme://user:pass@` userinfo and canonical `Basic <token>` values (the
+  reversible token aiohttp reprs from the CONNECT `Proxy-Authorization`
+  header); WARNING-and-higher records additionally get the existing
+  keyed/bearer/basic/authorization/JSON secret patterns and secret-keyed
+  structured extras (`password`, `*_token`, `api_key`, ...) of any value type,
+  and structured extra keys are redacted like values. Redaction never
   raises. `log_error_response` also masks URL userinfo. The server entrypoint
   routes `warnings.warn` output through the same handlers.
 - The application installs a redacting asyncio loop exception handler at
