@@ -336,6 +336,39 @@ def test_rendered_unclosed_connection_line_redacts_proxy_userinfo(monkeypatch, l
 
 
 @pytest.mark.parametrize("log_format", ["text", "json"])
+@pytest.mark.parametrize("password", ["sq'uote", 'dq"uote', "!$&()*+,;=", "at@sign", "sp ace"])
+def test_rendered_unclosed_connection_line_redacts_yarl_encoded_userinfo(monkeypatch, log_format, password):
+    # aiohttp reprs the proxy URL through yarl, which leaves RFC 3986 sub-delims
+    # (``'`` included) unencoded in userinfo and percent-encodes the rest.
+    from urllib.parse import quote
+
+    from yarl import URL
+
+    formatter = _formatter_from_config(monkeypatch, log_format)
+    proxy_url = str(URL(f"https://smart-user:{quote(password, safe='')}@{_PROXY_AUTHORITY}"))
+
+    output = _render(formatter, _record(_connection_key_line(proxy_url), level=logging.INFO))
+
+    assert password not in output
+    assert quote(password, safe="") not in output
+    assert f"https://[REDACTED]@{_PROXY_AUTHORITY}" in output
+
+
+def test_redact_rendered_log_text_masks_raw_userinfo_with_apostrophe():
+    # Raw ``trust_env`` proxy strings are not percent-encoded at all.
+    line = "probe " + runtime_basic_auth_url("smart-user", "sq'uote", "h:1") + " failed"
+
+    assert runtime_logging.redact_rendered_log_text(line, keyed_secrets=False) == "probe http://[REDACTED]@h:1 failed"
+    assert _redact_log_value(line) == "probe http://[REDACTED]@h:1 failed"
+
+
+def test_redact_rendered_log_text_leaves_quoted_host_only_url_before_quoted_email_alone():
+    line = "proxy=URL('http://183.110.26.193:6014'), owner='ops@example.com'"
+
+    assert runtime_logging.redact_rendered_log_text(line) == line
+
+
+@pytest.mark.parametrize("log_format", ["text", "json"])
 def test_rendered_basic_auth_repr_redacts_password(monkeypatch, log_format):
     formatter = _formatter_from_config(monkeypatch, log_format)
     line = _connection_key_line(f"http://{_PROXY_AUTHORITY}").replace(
@@ -403,6 +436,43 @@ def test_warning_records_apply_keyed_secret_patterns(text_formatter):
 
     assert "SECRETPW" not in output
     assert "password=[REDACTED] code=401" in output
+
+
+def test_warning_records_redact_python_repr_secret_keyed_mappings(text_formatter):
+    config = {
+        "password": "REPRPW",
+        "proxy_password": "it's",
+        "api_key": 123,
+        "secret": b"BYTESPW",
+        "access_token": ["LISTPW", "LISTPW2"],
+        "client_secret": None,
+        "attempt": 1,
+        "tokens": 7,
+    }
+
+    record = _record("config %r", level=logging.WARNING)
+    record.args = (config,)
+    output = _render(text_formatter, record)
+
+    for leaked in ("REPRPW", "it's", "BYTESPW", "LISTPW"):
+        assert leaked not in output
+    assert "'password': '[REDACTED]'" in output
+    assert "'proxy_password': \"[REDACTED]\"" in output
+    assert "'api_key': [REDACTED]" in output
+    assert "'secret': [REDACTED]" in output
+    assert "'access_token': [REDACTED]" in output
+    assert "'client_secret': [REDACTED]" in output
+    assert "'attempt': 1, 'tokens': 7" in output
+
+
+def test_info_records_keep_python_repr_secret_keyed_mappings(text_formatter):
+    # Keyed patterns are a WARNING+ policy; INFO renders the repr untouched.
+    record = _record("config %r", level=logging.INFO)
+    record.args = ({"password": "REPRPW"},)
+
+    output = _render(text_formatter, record)
+
+    assert "{'password': 'REPRPW'}" in output
 
 
 def test_authorization_midline_redaction_truncates_to_separator(text_formatter):
@@ -721,6 +791,25 @@ def test_json_formatter_renders_over_deep_extras_as_redacted_text(json_formatter
     assert "http://[REDACTED]@h" in json.dumps(parsed["details"])
 
 
+def test_json_formatter_redacts_secret_keyed_leaf_below_depth_limit(json_formatter):
+    # Beyond ``_MAX_JSON_LOG_DEPTH`` the subtree is rendered as Python repr
+    # text; a secret-keyed mapping there must still be masked at WARNING+.
+    leaf: object = {"password": "DEEPKEYEDPW", "u": runtime_basic_auth_url("u", "DEEPURLPW", "h")}
+    for _ in range(runtime_logging._MAX_JSON_LOG_DEPTH + 8):
+        leaf = {"n": leaf}
+    record = _record("proxy auth failed", level=logging.WARNING, name="app.core.clients.codex")
+    record.details = leaf
+
+    output = _render(json_formatter, record)
+
+    assert output, "the record must be emitted"
+    assert json.loads(output)["message"] == "proxy auth failed"
+    assert "DEEPKEYEDPW" not in output
+    assert "DEEPURLPW" not in output
+    assert "'password': '[REDACTED]'" in output
+    assert "http://[REDACTED]@h" in output
+
+
 def test_json_formatter_emits_record_when_extra_repr_explodes(json_formatter):
     record = _record("proxy auth failed", level=logging.WARNING, name="app.core.clients.codex")
     record.details = {"password": "EXPLODEPW", "connection": _ExplodingRepr()}
@@ -742,12 +831,16 @@ def test_json_formatter_emits_record_when_extra_iteration_explodes(json_formatte
             raise RuntimeError("iteration failure")
 
     record = _record("proxy auth failed", level=logging.WARNING, name="app.core.clients.codex")
-    record.details = _ExplodingItems(attempt=1)
+    record.details = _ExplodingItems(attempt=1, password="ITEMSPW")
 
     output = _render(json_formatter, record)
 
     assert output, "the record must be emitted"
-    assert json.loads(output)["message"] == "proxy auth failed"
+    parsed = json.loads(output)
+    assert parsed["message"] == "proxy auth failed"
+    # dict.__repr__ bypasses the exploding items(); the text fallback masks the key.
+    assert "ITEMSPW" not in output
+    assert parsed["details"] == "{'attempt': 1, 'password': '[REDACTED]'}"
 
 
 def _fuzz_extra(rng, depth: int, containers: list[object]) -> object:

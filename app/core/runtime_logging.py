@@ -33,8 +33,25 @@ _JSON_SENSITIVE_LOG_VALUE_PATTERN = re.compile(
 )
 # ``scheme://user:pass@`` userinfo, e.g. aiohttp ConnectionKey proxy URL reprs.
 # RFC 3986 userinfo never contains ``/``, ``?`` or ``#``, so a bare host
-# followed by a query/fragment holding an ``@`` is left alone.
-_USERINFO_PATTERN = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/?#\s@'\"]+)@")
+# followed by a query/fragment holding an ``@`` is left alone. ``'`` is an
+# RFC 3986 sub-delim that yarl leaves unencoded in userinfo (``URL('http://u:p'w@h')``),
+# so it must stay matchable; ``"`` is not valid unencoded userinfo (yarl emits
+# ``%22``) and stays excluded so a compact JSON document holding a URL and an
+# e-mail address is not over-matched.
+_USERINFO_PATTERN = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/?#\s@\"]+)@")
+# Python ``repr()`` of a secret-keyed mapping, ``{'password': 'x', 'token': 1}``:
+# the quote between key and colon defeats the ``key=value`` pattern above and
+# the JSON pattern below is double-quote only. Reached by ``%r``-logged
+# mappings and by the JSON formatter whenever a structured extra has to be
+# rendered as text (depth limit, exploding iteration, unserializable rebuild).
+# The key matches on suffix like ``_SENSITIVE_LOG_KEY_PATTERN``; the value is
+# a quoted string (quotes kept), bytes, a flat container, or a bare token up to
+# the next separator. Containers nested under a secret key are masked only to
+# their first level: a best-effort text backstop, not the structural pass.
+_PYTHON_REPR_SENSITIVE_LOG_VALUE_PATTERN = re.compile(
+    r"(?i)('[^'\\]*(?:password|passwd|pwd|token|secret|api[_-]?key|authorization)'\s*:\s*)"
+    r"(b?'(?:\\.|[^'\\])*'|b?\"(?:\\.|[^\"\\])*\"|\[[^\[\]]*\]|\([^()]*\)|\{[^{}]*\}|[^,}\]\)\s]+)"
+)
 # Structured (JSON extra) keys whose string values are secrets by name.
 _SENSITIVE_LOG_KEY_PATTERN = re.compile(r"(?i)(password|passwd|pwd|token|secret|api[_-]?key|authorization)$")
 # Case-folded substrings that must be present before the keyed/bearer/
@@ -68,7 +85,10 @@ def _redact_secret_patterns(text: str) -> str:
     redacted = _SENSITIVE_LOG_VALUE_PATTERNS[0].sub(_redact_keyed_secret, redacted)
     redacted = _SENSITIVE_LOG_VALUE_PATTERNS[1].sub(_redact_bearer_token, redacted)
     redacted = _BASIC_TOKEN_PATTERN.sub(_redact_bearer_token, redacted)
-    return _SENSITIVE_LOG_VALUE_PATTERNS[2].sub(_redact_authorization_value, redacted)
+    redacted = _SENSITIVE_LOG_VALUE_PATTERNS[2].sub(_redact_authorization_value, redacted)
+    # Last, so ``'Proxy-Authorization': 'Basic [REDACTED]'`` keeps the scheme
+    # the token passes above already exposed.
+    return _PYTHON_REPR_SENSITIVE_LOG_VALUE_PATTERN.sub(_redact_python_repr_secret, redacted)
 
 
 def redact_rendered_log_text(text: str, *, keyed_secrets: bool = True) -> str:
@@ -113,6 +133,14 @@ def _redact_keyed_secret(match: re.Match[str]) -> str:
 
 def _redact_json_secret(match: re.Match[str]) -> str:
     return f"{match.group(1)}{_LOG_REDACTION}{match.group(2)}"
+
+
+def _redact_python_repr_secret(match: re.Match[str]) -> str:
+    value = match.group(2)
+    if _LOG_REDACTION in value:
+        return match.group(0)
+    quote = value[0] if value[0] in "'\"" else ""
+    return f"{match.group(1)}{quote}{_LOG_REDACTION}{quote}"
 
 
 def _redact_bearer_token(match: re.Match[str]) -> str:

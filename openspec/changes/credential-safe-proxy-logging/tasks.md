@@ -19,7 +19,9 @@
 - [x] 2.3 Regression tests: exact production line (text and JSON), `https`
   variant, `BasicAuth` repr, exception traceback, never-throws, precheck
   short-circuit, bootstrap token byte-identity, mid-line `Authorization:`,
-  cyclic/deep/unprintable extras (never-raise, incl. randomized nesting)
+  cyclic/deep/unprintable extras (never-raise, incl. randomized nesting),
+  yarl-shaped userinfo with unencoded sub-delims (`'`), Python-repr
+  secret-keyed mappings (`%r` and the JSON formatter's text fallbacks)
 
 ## 3. Verification
 
