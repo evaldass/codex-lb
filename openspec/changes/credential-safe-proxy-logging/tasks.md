@@ -5,8 +5,7 @@
   requests and websocket connects; reserve `proxy_headers` from callers
 - [x] 1.2 Fail closed for credentialed routes to non-TLS targets (whole
   pool, before dispatch, ahead of every transport, as a connect-phase
-  transport error) and for usernames containing `:` at the
-  resolver, the dashboard create endpoint, and the endpoint test route
+  transport error) and for usernames containing `:` at the resolver
 - [x] 1.3 Pin byte-identical CONNECT header, credential-free `ConnectionKey`
   repr and `ClientHttpProxyError` text with a fake CONNECT proxy
 
@@ -22,20 +21,7 @@
   short-circuit, bootstrap token byte-identity, mid-line `Authorization:`,
   cyclic/deep/unprintable extras (never-raise, incl. randomized nesting)
 
-## 3. Loop exception handler
+## 3. Verification
 
-- [x] 3.1 Add idempotent `install_redacting_loop_exception_handler` that
-  redacts context reprs and delegates to the previous/default handler
-- [x] 3.2 Install once at lifespan start; test byte-identical output for
-  secret-free contexts under asyncio and uvloop
-
-## 4. Direct websocket InvalidProxy hardening
-
-- [x] 4.1 Use the fixed credential-safe message for `InvalidProxy` under
-  every policy; log only the URL-free reason
-- [x] 4.2 Update the Responses `InvalidProxy` test and the realtime spec
-
-## 5. Verification
-
-- [x] 5.1 Run focused unit tests, ruff, ty, proxy architecture check
-- [x] 5.2 Run strict scoped OpenSpec validation
+- [x] 3.1 Run focused unit tests, ruff, ty, proxy architecture check
+- [x] 3.2 Run strict scoped OpenSpec validation

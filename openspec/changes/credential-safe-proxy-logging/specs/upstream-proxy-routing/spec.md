@@ -14,11 +14,8 @@ target before any connection is opened and ahead of every transport branch
 (aiohttp, native egress, SOCKS), surfacing as a credential-free connect-phase
 transport error, so a credential-free fallback endpoint cannot absorb the
 misconfigured primary. Route resolution MUST fail closed for a proxy username
-containing `:`; the dashboard MUST reject such a username at endpoint
-creation, and the endpoint test route MUST report the resolver reason as a
-failed probe rather than an unhandled error. Native egress and SOCKS
-transports keep carrying credentials through their existing URL and field
-inputs.
+containing `:`. Native egress and SOCKS transports keep carrying credentials
+through their existing URL and field inputs.
 
 #### Scenario: Credentialed https endpoint uses Proxy-Authorization
 
@@ -40,10 +37,3 @@ inputs.
 
 - **WHEN** a proxy endpoint username contains `:`
 - **THEN** route resolution fails closed with reason `invalid_proxy_username`
-
-#### Scenario: Dashboard rejects and reports colon usernames
-
-- **WHEN** an operator creates an upstream proxy endpoint whose username contains `:`
-- **THEN** the request is rejected with a 400 error coded `invalid_proxy_username`
-- **WHEN** the endpoint test route is invoked for an already persisted endpoint the resolver rejects
-- **THEN** the response reports `ok: false` with the resolver reason as `error`

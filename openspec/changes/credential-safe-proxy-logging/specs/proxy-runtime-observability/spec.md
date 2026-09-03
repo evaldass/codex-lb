@@ -15,12 +15,9 @@ secret fields embedded in strings, and structured extra fields whose key names
 a secret, whatever the value type) redacted. Redaction MUST never raise: on
 failure the record is emitted unchanged, and structured extras that are cyclic,
 pathologically deep, or unprintable MUST still be emitted with redaction
-applied to every finite, printable part. Application startup MUST install an asyncio loop exception
-handler that redacts the `repr()` of context values before the default
-handler logs them, MUST leave secret-free context output byte-identical to
-the default handler, and MUST route `warnings.warn` output through the same
-log handlers. Log records that contain no secret patterns MUST render
-byte-identically to the unredacted rendering.
+applied to every finite, printable part. Application startup MUST route
+`warnings.warn` output through the same log handlers. Log records that contain
+no secret patterns MUST render byte-identically to the unredacted rendering.
 
 #### Scenario: Unclosed aiohttp connection repr is credential-free
 
@@ -32,7 +29,7 @@ byte-identically to the unredacted rendering.
 #### Scenario: Proxy error repr with a Basic token is masked
 
 - **GIVEN** an aiohttp proxy error whose tunnel request headers carry `Proxy-Authorization: Basic <token>`
-- **WHEN** the error is logged with `%r` at any level, or its repr reaches the loop exception handler through an unretrieved task
+- **WHEN** the error is logged with `%r` at any level, or its repr is logged by the loop's exception handler for an unretrieved task
 - **THEN** the rendered record contains `'Proxy-Authorization': 'Basic [REDACTED]'`
 - **AND** neither the token nor the password appears in the text or JSON rendering
 
@@ -48,7 +45,6 @@ byte-identically to the unredacted rendering.
 
 - **WHEN** a record such as the one-time bootstrap token banner contains no URL userinfo or keyed secret pattern
 - **THEN** the rendered output is byte-identical to the unredacted rendering
-- **AND** the loop exception handler output for a secret-free context is byte-identical to the default handler output
 
 #### Scenario: Redaction failure never breaks logging
 

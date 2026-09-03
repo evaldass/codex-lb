@@ -6,9 +6,7 @@ password. The Codex upstream client passes the credential-bearing proxy URL
 to aiohttp, which stores it verbatim in the connection pool key and renders it
 in `Connection.__repr__` and `ClientHttpProxyError.__str__`; the loop's default
 exception handler then logs that repr through the `asyncio` logger, and none
-of the application log formatters redact URL userinfo. The direct websocket
-path also forwards `websockets.InvalidProxy` text (full proxy URL) to API
-clients under the Responses policy.
+of the application log formatters redact URL userinfo.
 
 ## What Changes
 
@@ -20,10 +18,9 @@ clients under the Responses policy.
   headers only on the CONNECT tunnel; plaintext targets fail closed for the
   whole ordered pool before any dispatch and ahead of every transport branch
   (native egress and SOCKS included), as a connect-phase transport error that
-  callers map to the usual upstream-unavailable response. The resolver rejects usernames
-  containing `:` (not encodable as Basic credentials); the dashboard rejects
-  them at creation and the endpoint test route reports the resolver reason.
-  Native egress and SOCKS transports keep their existing fields.
+  callers map to the usual upstream-unavailable response. The resolver rejects
+  usernames containing `:` (not encodable as Basic credentials). Native egress
+  and SOCKS transports keep their existing fields.
 - Every rendered log record (text and JSON formatters, any logger) masks
   `scheme://user:pass@` userinfo and canonical `Basic <token>` values (the
   reversible token aiohttp reprs from the CONNECT `Proxy-Authorization`
@@ -31,14 +28,14 @@ clients under the Responses policy.
   keyed/bearer/basic/authorization/JSON secret patterns and secret-keyed
   structured extras (`password`, `*_token`, `api_key`, ...) of any value type,
   and structured extra keys are redacted like values. Redaction never
-  raises. `log_error_response` also masks URL userinfo. The server entrypoint
+  raises, including for cyclic, pathologically deep, or unprintable structured
+  extras. `log_error_response` also masks URL userinfo. The server entrypoint
   routes `warnings.warn` output through the same handlers.
-- The application installs a redacting asyncio loop exception handler at
-  lifespan start so object reprs (`ConnectionKey`, `BasicAuth`, task
-  exceptions) are masked before the default handler renders them.
-- The direct websocket connector returns the fixed credential-safe message for
-  `InvalidProxy` under every policy (Responses included) and logs only the
-  URL-free reason.
+- Out of scope here, stacked as the follow-up change
+  `credential-safe-proxy-logging-loop-handler`: the redacting asyncio loop
+  exception handler (defense in depth for object reprs), the dashboard
+  colon-username hardening, and the Responses websocket `InvalidProxy`
+  message.
 
 ## Capabilities
 
@@ -51,24 +48,17 @@ None.
 - `upstream-proxy-routing`: aiohttp routed egress MUST carry proxy credentials
   in `Proxy-Authorization`, never URL userinfo; credentialed aiohttp routes
   MUST require a TLS target.
-- `proxy-runtime-observability`: rendered log records and loop exception
-  handler output MUST redact URL userinfo and keyed secrets regardless of the
-  originating logger.
-- `realtime-api-compat`: the Responses websocket `InvalidProxy` message is now
-  the same fixed credential-safe message as the live sideband.
+- `proxy-runtime-observability`: rendered log records MUST redact URL
+  userinfo and keyed secrets regardless of the originating logger, and
+  redaction MUST never drop a record.
 
 ## Impact
 
 - Code: `app/core/upstream_proxy/types.py`, `app/core/upstream_proxy/resolver.py`,
-  `app/core/clients/codex.py`, `app/core/runtime_logging.py`, `app/main.py`,
-  `app/cli.py`, `app/core/clients/proxy_websocket.py`,
-  `app/modules/settings/api.py`.
+  `app/core/clients/codex.py`, `app/core/runtime_logging.py`, `app/cli.py`.
 - Tests: `tests/unit/test_upstream_proxy_types.py` (new),
-  `tests/unit/test_runtime_logging_loop_handler.py` (new),
   `tests/unit/test_codex_client.py`, `tests/unit/test_structured_logging.py`,
-  `tests/unit/test_upstream_proxy_resolver.py`,
-  `tests/unit/test_proxy_websocket_client.py`, `tests/unit/test_cli.py`,
-  `tests/integration/test_settings_api.py`.
+  `tests/unit/test_upstream_proxy_resolver.py`, `tests/unit/test_cli.py`.
 - Wire compatibility: identical CONNECT `Proxy-Authorization` bytes, identical
   per-proxy connection pooling (keyed through `proxy_headers_hash`), no
   forwarded payload change. INFO-level log records cost ~1 us more to render.
