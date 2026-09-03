@@ -9,7 +9,14 @@ import pytest
 from aiohttp.client_reqrep import ConnectionKey
 from python_socks import ProxyType
 
-from app.core.clients.codex import CodexClient, CodexTransportError, require_route_or_direct_egress_opt_in
+from app.core.clients import codex as codex_module
+from app.core.clients.codex import (
+    CodexClient,
+    CodexTransportError,
+    create_codex_session,
+    require_route_or_direct_egress_opt_in,
+)
+from app.core.clients.http import _reset_shared_ssl_context, _shared_ssl_context
 from app.core.clients.native_egress import (
     NativeEgressRequest,
     NativeEgressTransportError,
@@ -898,3 +905,30 @@ async def test_socks_websocket_cancel_during_enter_closes_local_session(
     assert session.closed == 1
     assert session.context.exited is False
     assert session.context.owned is False
+
+
+@pytest.mark.asyncio
+async def test_create_codex_session_connectors_share_one_ssl_context() -> None:
+    _reset_shared_ssl_context()
+    first = create_codex_session()
+    second = create_codex_session()
+    try:
+        assert first.connector._ssl is second.connector._ssl
+        assert first.connector._ssl is _shared_ssl_context()
+    finally:
+        await first.close()
+        await second.close()
+        _reset_shared_ssl_context()
+
+
+@pytest.mark.asyncio
+async def test_socks_proxy_connector_reuses_shared_ssl_context() -> None:
+    _reset_shared_ssl_context()
+    endpoint = ResolvedProxyEndpoint("ep_1", "socks5h", "proxy.test", 1080)
+    connector = codex_module._socks_proxy_connector(endpoint)
+    try:
+        assert connector._ssl is _shared_ssl_context()
+        assert connector._rdns is True
+    finally:
+        await connector.close()
+        _reset_shared_ssl_context()
