@@ -14,7 +14,7 @@ from app.core.upstream_proxy import ResolvedProxyEndpoint
 pytestmark = pytest.mark.unit
 
 # latin1 non-ASCII so the header encoding is pinned against aiohttp's own
-# userinfo path (BasicAuth defaults to latin1; encode_basic_auth to utf-8).
+# userinfo path (BasicAuth.from_url decodes userinfo as latin1; utf-8 differs).
 _PASSWORD = "S3cret-P\u00e4ss"
 _USERNAME = "smart-user"
 
@@ -37,9 +37,13 @@ def test_aiohttp_proxy_kwargs_move_credentials_into_proxy_authorization() -> Non
     assert "@" not in kwargs["proxy"]
     header = kwargs["proxy_headers"]["Proxy-Authorization"]
     # Byte-identical to the token aiohttp derives from ``https://u:p@`` userinfo
-    # (BasicAuth.encode: latin1, not encode_basic_auth's utf-8 default).
-    assert header == "Basic " + base64.b64encode(f"{_USERNAME}:{_PASSWORD}".encode("latin1")).decode("latin1")
-    assert header != aiohttp.encode_basic_auth(_USERNAME, _PASSWORD)
+    # (the ``BasicAuth.from_url`` path the ClientSession takes on every aiohttp
+    # release in the declared range; no 3.14-only helper involved).
+    assert header == "Basic " + base64.b64encode(f"{_USERNAME}:{_PASSWORD}".encode("latin1")).decode("ascii")
+    aiohttp_userinfo_auth = aiohttp.BasicAuth.from_url(URL(f"https://{_USERNAME}:{_PASSWORD}@proxy.test:8080"))
+    assert aiohttp_userinfo_auth is not None
+    assert header == aiohttp_userinfo_auth.encode()
+    assert header != "Basic " + base64.b64encode(f"{_USERNAME}:{_PASSWORD}".encode("utf-8")).decode("ascii")
 
 
 @pytest.mark.parametrize("scheme", ["http", "socks5", "socks5h"])

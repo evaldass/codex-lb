@@ -27,7 +27,11 @@ _JSON_SENSITIVE_LOG_VALUE_PATTERN = re.compile(
     r'(?:\\.|[^"\\])*(")'
 )
 # ``scheme://user:pass@`` userinfo, e.g. aiohttp ConnectionKey proxy URL reprs.
-_USERINFO_PATTERN = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/\s@'\"]+)@")
+# RFC 3986 userinfo never contains ``/``, ``?`` or ``#``, so a bare host
+# followed by a query/fragment holding an ``@`` is left alone.
+_USERINFO_PATTERN = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/?#\s@'\"]+)@")
+# Structured (JSON extra) keys whose string values are secrets by name.
+_SENSITIVE_LOG_KEY_PATTERN = re.compile(r"(?i)(password|passwd|pwd|token|secret|api[_-]?key|authorization)$")
 # Case-folded substrings that must be present before the keyed/bearer/
 # authorization/JSON patterns above can match; keeps the per-record cost of
 # credential-free lines to a casefold plus substring scans.
@@ -132,10 +136,23 @@ def _redact_json_log_value(record: logging.LogRecord, value: object) -> object:
     if isinstance(value, str):
         return _redact_record_text(record, value)
     if isinstance(value, dict):
-        return {key: _redact_json_log_value(record, item) for key, item in value.items()}
+        return {key: _redact_json_log_item(record, key, item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_redact_json_log_value(record, item) for item in value]
     return value
+
+
+def _redact_json_log_item(record: logging.LogRecord, key: object, value: object) -> object:
+    # Key-aware for WARNING+ like the keyed text patterns: ``{"password": "x"}``
+    # carries the secret in a value the value-only pass cannot recognise.
+    if (
+        record.levelno >= logging.WARNING
+        and isinstance(value, str)
+        and isinstance(key, str)
+        and _SENSITIVE_LOG_KEY_PATTERN.search(key)
+    ):
+        return _LOG_REDACTION
+    return _redact_json_log_value(record, value)
 
 
 class JsonFormatter(logging.Formatter):
@@ -191,7 +208,7 @@ class JsonFormatter(logging.Formatter):
             if key not in excluded_keys:
                 try:
                     json.dumps(value)
-                    log_entry[key] = _redact_json_log_value(record, value)
+                    log_entry[key] = _redact_json_log_item(record, key, value)
                 except (TypeError, ValueError):
                     log_entry[key] = _redact_record_text(record, str(value))
 

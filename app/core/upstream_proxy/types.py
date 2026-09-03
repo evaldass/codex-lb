@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
-from aiohttp import encode_basic_auth
-
 _PLAINTEXT_SCHEMES = frozenset({"http", "socks5", "socks5h"})
+
+
+def _encode_basic_proxy_auth(username: str, password: str) -> str:
+    # RFC 7617 Basic token encoded with latin1, byte-identical to the header
+    # aiohttp derives from URL userinfo (``BasicAuth`` default encoding), so
+    # the CONNECT request is unchanged. Local so the declared ``aiohttp>=3.13``
+    # floor holds (``aiohttp.encode_basic_auth`` only exists in 3.14+).
+    if ":" in username:
+        raise ValueError("proxy usernames cannot contain ':'")
+    token = base64.b64encode(f"{username}:{password}".encode("latin1")).decode("ascii")
+    return f"Basic {token}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +61,7 @@ class ResolvedProxyEndpoint:
         kwargs: dict[str, Any] = {"proxy": self.proxy_url_without_credentials}
         if self.username:
             kwargs["proxy_headers"] = {
-                "Proxy-Authorization": encode_basic_auth(self.username, self.password or "", encoding="latin1"),
+                "Proxy-Authorization": _encode_basic_proxy_auth(self.username, self.password or ""),
             }
         return kwargs
 

@@ -8,7 +8,8 @@ formatters MUST have `scheme://user:password@` URL userinfo replaced with
 `asyncio`, aiohttp, uvicorn) and including exception and stack text. Records
 at WARNING level or higher MUST additionally have keyed secrets
 (`password=`, `token=`, `api_key=`, bearer and authorization values, JSON
-secret fields) redacted. Redaction MUST never raise; on failure the record is
+secret fields embedded in strings, and structured extra fields whose key names
+a secret) redacted. Redaction MUST never raise; on failure the record is
 emitted unchanged. Application startup MUST install an asyncio loop exception
 handler that redacts the `repr()` of context values before the default
 handler logs them, MUST leave secret-free context output byte-identical to
@@ -22,6 +23,13 @@ byte-identically to the unredacted rendering.
 - **WHEN** the loop exception handler logs `Unclosed connection` through the `asyncio` logger
 - **THEN** the rendered record contains `proxy=URL('scheme://[REDACTED]@host:port')`
 - **AND** the password appears in neither the text nor the JSON rendering
+
+#### Scenario: Secret-keyed structured extras are masked
+
+- **GIVEN** a WARNING or higher record carries an extra field such as `{"password": "..."}` or `{"access_token": "..."}`
+- **WHEN** the JSON formatter renders the record
+- **THEN** the field value is replaced with `[REDACTED]`
+- **AND** fields such as `attempt` or `tokens` keep their values
 
 #### Scenario: Secret-free records are unchanged
 

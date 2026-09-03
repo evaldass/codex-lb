@@ -464,9 +464,32 @@ def test_json_formatter_redacts_extras_and_nested_values(json_formatter):
 
     assert parsed["proxy_url"] == "http://[REDACTED]@proxy.test:1"
     assert parsed["details"]["urls"] == ["http://[REDACTED]@proxy.test:2"]
+    assert parsed["details"]["password"] == "[REDACTED]"
     assert parsed["connection"] == "<Conn http://[REDACTED]@proxy.test:3>"
-    for secret in ("EXTRAPW", "NESTEDPW", "REPRPW"):
+    for secret in ("EXTRAPW", "NESTEDPW", "REPRPW", "PLAINPW"):
         assert secret not in json.dumps(parsed)
+
+
+@pytest.mark.parametrize("level", [logging.WARNING, logging.ERROR])
+def test_json_formatter_redacts_secret_keyed_extras_at_warning_and_above(json_formatter, level):
+    record = _record("proxy auth failed", level=level, name="app.core.clients.codex")
+    record.api_key = "TOPLEVELKEY"
+    record.details = {"access_token": "NESTEDTOKEN", "attempt": 2, "tokens": "not-a-secret"}
+
+    parsed = json.loads(json_formatter.format(record))
+
+    assert parsed["api_key"] == "[REDACTED]"
+    assert parsed["details"] == {"access_token": "[REDACTED]", "attempt": 2, "tokens": "not-a-secret"}
+
+
+def test_json_formatter_leaves_secret_keyed_extras_alone_below_warning(json_formatter):
+    # INFO extras keep the cheap value-only pass (same trade-off as text records).
+    record = _record("usage refreshed", level=logging.INFO, name="app.core.usage")
+    record.details = {"token_count": "12", "password": "info-level"}
+
+    parsed = json.loads(json_formatter.format(record))
+
+    assert parsed["details"] == {"token_count": "12", "password": "info-level"}
 
 
 def test_json_access_formatter_redacts_request_line():
@@ -507,3 +530,23 @@ def test_redact_rendered_log_text_leaves_plain_email_addresses_alone():
     line = "notify owner ops@example.com about https://status.example.com/incident"
 
     assert runtime_logging.redact_rendered_log_text(line) == line
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "GET https://status.example?owner=ops@example.com done",
+        "see https://status.example#frag@x",
+        "https://host/path?owner=ops@example.com",
+    ],
+)
+def test_redact_rendered_log_text_leaves_host_only_urls_with_at_in_query_or_fragment_alone(line):
+    # RFC 3986 userinfo cannot contain ``?`` or ``#``; a bare host followed by
+    # a query/fragment holding an e-mail address is not a credential.
+    assert runtime_logging.redact_rendered_log_text(line) == line
+
+
+def test_redact_rendered_log_text_still_masks_userinfo_before_query():
+    line = "probe " + runtime_basic_auth_url("u", "QUERYPW", "h") + "?next=ops@example.com"
+
+    assert runtime_logging.redact_rendered_log_text(line) == "probe http://[REDACTED]@h?next=ops@example.com"

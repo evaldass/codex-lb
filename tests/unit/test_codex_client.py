@@ -368,17 +368,19 @@ async def test_runtime_route_and_fingerprint_overrides_are_rejected(
 
 
 @pytest.mark.asyncio
-async def test_credentialed_route_requires_tls_target_for_request(route: ResolvedUpstreamRoute) -> None:
+@pytest.mark.parametrize("method", ["POST", "GET"])
+async def test_credentialed_route_requires_tls_target_for_request(route: ResolvedUpstreamRoute, method: str) -> None:
     # aiohttp forwards proxy_headers only on the CONNECT tunnel, so a plaintext
-    # target would silently drop the proxy credentials; fail closed instead.
+    # target would silently drop the proxy credentials; fail closed before any
+    # dispatch. The idempotent GET must not slip through the credential-free
+    # fallback endpoint either (the route fixture carries one).
     session = _Session()
     client = CodexClient(session)
 
-    with pytest.raises(CodexTransportError) as exc_info:
-        await client.request("POST", "http://upstream.test", route=route, json={"x": 1})
+    with pytest.raises(ValueError, match="https/wss upstream target") as exc_info:
+        await client.request(method, "http://upstream.test", route=route, json={"x": 1})
 
     assert session.calls == []
-    assert "ep_1" in str(exc_info.value)
     assert "proxy.test" not in str(exc_info.value)
 
 
@@ -391,6 +393,32 @@ async def test_credentialed_route_requires_tls_target_for_ws_connect(route: Reso
         await client.ws_connect("ws://upstream.test", route=route)
 
     assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_credentialed_route_requires_tls_target_for_ws_open_with_fallback(route: ResolvedUpstreamRoute) -> None:
+    session = _Session()
+    client = CodexClient(session)
+
+    with pytest.raises(ValueError, match="https/wss upstream target"):
+        await client.open_ws_with_route_metadata("ws://upstream.test", route=route)
+
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_credential_free_route_allows_plaintext_target() -> None:
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "https", "proxy.test", 8080),
+    )
+    session = _Session()
+    client = CodexClient(session)
+
+    await client.request("GET", "http://upstream.test", route=route)
+
+    _assert_credential_free_proxy_call(session.calls[0], "https://proxy.test:8080")
 
 
 @pytest.mark.asyncio

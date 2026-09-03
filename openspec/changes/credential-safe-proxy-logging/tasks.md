@@ -3,8 +3,9 @@
 - [x] 1.1 Add `ResolvedProxyEndpoint.aiohttp_proxy_kwargs()` (credential-free
   `proxy` + latin1 `Proxy-Authorization` header) and use it for routed aiohttp
   requests and websocket connects; reserve `proxy_headers` from callers
-- [x] 1.2 Fail closed for credentialed aiohttp routes to non-TLS targets and
-  for usernames containing `:` at the resolver
+- [x] 1.2 Fail closed for credentialed aiohttp routes to non-TLS targets
+  (whole pool, before dispatch) and for usernames containing `:` at the
+  resolver, the dashboard create endpoint, and the endpoint test route
 - [x] 1.3 Pin byte-identical CONNECT header, credential-free `ConnectionKey`
   repr and `ClientHttpProxyError` text with a fake CONNECT proxy
 
@@ -13,7 +14,8 @@
 - [x] 2.1 Add never-throwing `redact_rendered_log_text` with URL userinfo
   pattern and cheap prechecks; fold userinfo into `_redact_log_value`
 - [x] 2.2 Apply to text, access, and JSON formatters (message, exception,
-  extras); route `warnings.warn` through logging at server start
+  extras incl. secret-keyed fields); route `warnings.warn` through logging at
+  server start
 - [x] 2.3 Regression tests: exact production line (text and JSON), `https`
   variant, `BasicAuth` repr, exception traceback, never-throws, precheck
   short-circuit, bootstrap token byte-identity, mid-line `Authorization:`

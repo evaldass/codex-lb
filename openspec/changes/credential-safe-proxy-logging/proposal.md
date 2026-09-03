@@ -17,12 +17,15 @@ clients under the Responses policy.
   aiohttp derives from URL userinfo) and a credential-free proxy URL, so
   aiohttp repr surfaces never contain the password. Credentialed aiohttp routes
   require a TLS (`https`/`wss`) upstream target because aiohttp forwards proxy
-  headers only on the CONNECT tunnel; plaintext targets fail closed. The
-  resolver rejects usernames containing `:` (not encodable as Basic
-  credentials). Native egress and SOCKS transports keep their existing fields.
+  headers only on the CONNECT tunnel; plaintext targets fail closed for the
+  whole ordered pool before any dispatch. The resolver rejects usernames
+  containing `:` (not encodable as Basic credentials); the dashboard rejects
+  them at creation and the endpoint test route reports the resolver reason.
+  Native egress and SOCKS transports keep their existing fields.
 - Every rendered log record (text and JSON formatters, any logger) masks
   `scheme://user:pass@` userinfo; WARNING-and-higher records additionally get
-  the existing keyed/bearer/authorization/JSON secret patterns. Redaction never
+  the existing keyed/bearer/authorization/JSON secret patterns and secret-keyed
+  structured extras (`password`, `*_token`, `api_key`, ...). Redaction never
   raises. `log_error_response` also masks URL userinfo. The server entrypoint
   routes `warnings.warn` output through the same handlers.
 - The application installs a redacting asyncio loop exception handler at
@@ -53,12 +56,14 @@ None.
 
 - Code: `app/core/upstream_proxy/types.py`, `app/core/upstream_proxy/resolver.py`,
   `app/core/clients/codex.py`, `app/core/runtime_logging.py`, `app/main.py`,
-  `app/cli.py`, `app/core/clients/proxy_websocket.py`.
+  `app/cli.py`, `app/core/clients/proxy_websocket.py`,
+  `app/modules/settings/api.py`.
 - Tests: `tests/unit/test_upstream_proxy_types.py` (new),
   `tests/unit/test_runtime_logging_loop_handler.py` (new),
   `tests/unit/test_codex_client.py`, `tests/unit/test_structured_logging.py`,
   `tests/unit/test_upstream_proxy_resolver.py`,
-  `tests/unit/test_proxy_websocket_client.py`, `tests/unit/test_cli.py`.
+  `tests/unit/test_proxy_websocket_client.py`, `tests/unit/test_cli.py`,
+  `tests/integration/test_settings_api.py`.
 - Wire compatibility: identical CONNECT `Proxy-Authorization` bytes, identical
   per-proxy connection pooling (keyed through `proxy_headers_hash`), no
   forwarded payload change. INFO-level log records cost ~1 us more to render.
