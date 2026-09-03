@@ -19,7 +19,8 @@
   `warnings.warn` through logging at server start
 - [x] 2.3 Regression tests: exact production line (text and JSON), `https`
   variant, `BasicAuth` repr, exception traceback, never-throws, precheck
-  short-circuit, bootstrap token byte-identity, mid-line `Authorization:`
+  short-circuit, bootstrap token byte-identity, mid-line `Authorization:`,
+  cyclic/deep/unprintable extras (never-raise, incl. randomized nesting)
 
 ## 3. Loop exception handler
 

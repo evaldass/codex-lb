@@ -143,16 +143,53 @@ class UtcAccessFormatter(_RedactingFormatterMixin, AccessFormatter):
     converter: Callable[[float | None], time.struct_time] = staticmethod(_utc_converter)
 
 
-def _redact_json_log_value(record: logging.LogRecord, value: object) -> object:
+# Containers nested deeper than this are rendered as redacted text instead of
+# being rebuilt, so the key-aware pass can never recurse without bound.
+_MAX_JSON_LOG_DEPTH = 32
+# Placeholders for a container that refers back to an ancestor, mirroring the
+# ``{...}`` / ``[...]`` markers Python's own repr emits for recursive objects.
+_CYCLIC_JSON_LOG_PLACEHOLDERS: dict[type, str] = {dict: "{...}", list: "[...]", tuple: "(...)"}
+
+
+def _redact_json_log_value(
+    record: logging.LogRecord,
+    value: object,
+    *,
+    _ancestors: frozenset[int] = frozenset(),
+    _depth: int = 0,
+) -> object:
+    """Rebuild ``value`` with redaction applied to every reachable string (and secret-keyed field).
+
+    Cycles (a container that refers back to an ancestor) collapse to a repr
+    placeholder and nesting beyond ``_MAX_JSON_LOG_DEPTH`` is rendered as
+    redacted text, so redaction still applies wherever the structure is finite
+    and the rebuild itself cannot raise ``RecursionError``.
+    """
     if isinstance(value, str):
         return _redact_record_text(record, value)
+    if not isinstance(value, (dict, list, tuple)):
+        return value
+    if id(value) in _ancestors:
+        return next(marker for kind, marker in _CYCLIC_JSON_LOG_PLACEHOLDERS.items() if isinstance(value, kind))
+    if _depth >= _MAX_JSON_LOG_DEPTH:
+        return _redact_record_text(record, _safe_str(value))
+    ancestors = _ancestors | {id(value)}
+    depth = _depth + 1
     if isinstance(value, dict):
         return {
-            _redact_json_log_key(record, key): _redact_json_log_item(record, key, item) for key, item in value.items()
+            _redact_json_log_key(record, key): _redact_json_log_item(record, key, item, ancestors, depth)
+            for key, item in value.items()
         }
-    if isinstance(value, (list, tuple)):
-        return [_redact_json_log_value(record, item) for item in value]
-    return value
+    return [_redact_json_log_value(record, item, _ancestors=ancestors, _depth=depth) for item in value]
+
+
+def _safe_str(value: object) -> str:
+    # ``str()`` of an extra can itself raise (exploding ``__repr__``, repr of a
+    # pathologically deep container); logging must still emit the record.
+    try:
+        return str(value)
+    except Exception:
+        return f"<unprintable {type(value).__name__}>"
 
 
 def _redact_json_log_key(record: logging.LogRecord, key: object) -> object:
@@ -167,10 +204,12 @@ def _is_secret_json_log_key(record: logging.LogRecord, key: object) -> bool:
     return record.levelno >= logging.WARNING and isinstance(key, str) and bool(_SENSITIVE_LOG_KEY_PATTERN.search(key))
 
 
-def _redact_json_log_item(record: logging.LogRecord, key: object, value: object) -> object:
+def _redact_json_log_item(
+    record: logging.LogRecord, key: object, value: object, ancestors: frozenset[int], depth: int
+) -> object:
     if value is not None and _is_secret_json_log_key(record, key):
         return _LOG_REDACTION
-    return _redact_json_log_value(record, value)
+    return _redact_json_log_value(record, value, _ancestors=ancestors, _depth=depth)
 
 
 class JsonFormatter(logging.Formatter):
@@ -231,12 +270,20 @@ class JsonFormatter(logging.Formatter):
                 continue
             # Rebuild containers key-aware first so a non-serializable leaf
             # (bytes) cannot drag secret-keyed siblings into the str() fallback.
-            redacted = _redact_json_log_value(record, value)
+            # Redaction never raises: if the rebuild fails anyway (a container
+            # whose iteration explodes), fall back to the legacy rendering of
+            # the original value rather than dropping the record.
+            try:
+                redacted = _redact_json_log_value(record, value)
+            except Exception:
+                redacted = value
             try:
                 json.dumps(redacted)
                 log_entry[safe_key] = redacted
-            except (TypeError, ValueError):
-                log_entry[safe_key] = _redact_record_text(record, str(redacted))
+            except Exception:
+                # TypeError/ValueError for unserializable leaves and cycles;
+                # anything else (RecursionError, exploding iteration) too.
+                log_entry[safe_key] = _redact_record_text(record, _safe_str(redacted))
 
         if record.exc_info:
             log_entry["exception"] = _redact_record_text(record, self.formatException(record.exc_info))

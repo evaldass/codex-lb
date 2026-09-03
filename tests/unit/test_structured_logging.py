@@ -664,3 +664,143 @@ def test_json_formatter_redacts_userinfo_in_extra_keys(json_formatter):
     assert parsed["http://[REDACTED]@proxy.test:2"] == "failed"
     assert "PWKEY" not in json.dumps(parsed)
     assert "PWTOP" not in json.dumps(parsed)
+
+
+# --- never-raise: cyclic, deep and unprintable structured extras -------------
+
+
+class _ExplodingRepr:
+    def __repr__(self) -> str:
+        raise RuntimeError("repr failure")
+
+
+def test_json_formatter_emits_record_with_self_referential_dict_extra(json_formatter):
+    # Regression: the key-aware rebuild recursed on cycles and raised
+    # RecursionError ahead of the json.dumps guard, so the record was dropped.
+    details: dict[str, object] = {"password": "CYCLEPW", "proxy_url": runtime_basic_auth_url("u", "CYCLEURLPW", "h")}
+    details["self"] = details
+    record = _record("proxy auth failed", level=logging.WARNING, name="app.core.clients.codex")
+    record.details = details
+
+    output = _render(json_formatter, record)
+
+    assert output, "the record must be emitted"
+    parsed = json.loads(output)
+    assert parsed["message"] == "proxy auth failed"
+    assert parsed["details"] == {"password": "[REDACTED]", "proxy_url": "http://[REDACTED]@h", "self": "{...}"}
+    assert "CYCLEPW" not in output
+    assert "CYCLEURLPW" not in output
+
+
+def test_json_formatter_emits_record_with_list_cycle_extra(json_formatter):
+    urls: list[object] = [runtime_basic_auth_url("u", "LISTPW", "proxy.test:2")]
+    urls.append(urls)
+    record = _record("proxy failure", level=logging.INFO, name="app.core.clients.codex")
+    record.details = {"urls": urls, "attempt": 1}
+
+    output = _render(json_formatter, record)
+
+    assert output, "the record must be emitted"
+    parsed = json.loads(output)
+    assert parsed["details"] == {"urls": ["http://[REDACTED]@proxy.test:2", "[...]"], "attempt": 1}
+    assert "LISTPW" not in output
+
+
+def test_json_formatter_renders_over_deep_extras_as_redacted_text(json_formatter):
+    leaf: object = runtime_basic_auth_url("u", "DEEPPW", "h")
+    for _ in range(200):
+        leaf = [leaf]
+    record = _record("proxy failure", level=logging.INFO, name="app.core.clients.codex")
+    record.details = leaf
+
+    output = _render(json_formatter, record)
+
+    assert output, "the record must be emitted"
+    parsed = json.loads(output)
+    assert "DEEPPW" not in output
+    assert "http://[REDACTED]@h" in json.dumps(parsed["details"])
+
+
+def test_json_formatter_emits_record_when_extra_repr_explodes(json_formatter):
+    record = _record("proxy auth failed", level=logging.WARNING, name="app.core.clients.codex")
+    record.details = {"password": "EXPLODEPW", "connection": _ExplodingRepr()}
+    record.connection = _ExplodingRepr()
+
+    output = _render(json_formatter, record)
+
+    assert output, "the record must be emitted"
+    parsed = json.loads(output)
+    assert parsed["message"] == "proxy auth failed"
+    assert parsed["details"] == "<unprintable dict>"
+    assert parsed["connection"] == "<unprintable _ExplodingRepr>"
+    assert "EXPLODEPW" not in output
+
+
+def test_json_formatter_emits_record_when_extra_iteration_explodes(json_formatter):
+    class _ExplodingItems(dict):
+        def items(self):
+            raise RuntimeError("iteration failure")
+
+    record = _record("proxy auth failed", level=logging.WARNING, name="app.core.clients.codex")
+    record.details = _ExplodingItems(attempt=1)
+
+    output = _render(json_formatter, record)
+
+    assert output, "the record must be emitted"
+    assert json.loads(output)["message"] == "proxy auth failed"
+
+
+def _fuzz_extra(rng, depth: int, containers: list[object]) -> object:
+    kind = rng.randrange(12)
+    if depth <= 0 or kind < 4:
+        return rng.choice(
+            [
+                "plain",
+                runtime_basic_auth_url("u", "FUZZPW", "h"),
+                b"FUZZBYTES",
+                42,
+                1.5,
+                None,
+                True,
+                _ExplodingRepr(),
+                "password=FUZZKEYED",
+            ]
+        )
+    if kind < 6 and containers:
+        return rng.choice(containers)  # back-reference: cycle or shared subtree
+    size = rng.randrange(4)
+    if kind < 8:
+        built: object = tuple(_fuzz_extra(rng, depth - 1, containers) for _ in range(size))
+    elif kind < 10:
+        items = [_fuzz_extra(rng, depth - 1, containers) for _ in range(size)]
+        built = items
+        containers.append(items)
+        if rng.random() < 0.3:
+            items.append(items)
+    else:
+        keys = ["password", "token", "attempt", "proxy_url", 7, runtime_basic_auth_url("u", "FUZZKEYPW", "h")]
+        mapping = {rng.choice(keys): _fuzz_extra(rng, depth - 1, containers) for _ in range(size)}
+        built = mapping
+        containers.append(mapping)
+        if rng.random() < 0.3:
+            mapping["self"] = mapping
+    return built
+
+
+@pytest.mark.parametrize("level", [logging.INFO, logging.ERROR])
+def test_json_formatter_never_raises_on_random_nested_extras(json_formatter, level):
+    import random
+
+    for seed in range(150):
+        rng = random.Random(seed)
+        record = _record("fuzz %s", level=level, name="app.core.clients.codex")
+        record.args = (seed,)
+        record.details = _fuzz_extra(rng, depth=5, containers=[])
+        record.leaf = _fuzz_extra(rng, depth=1, containers=[])
+
+        output = _render(json_formatter, record)
+
+        assert output, f"seed {seed}: the record must be emitted"
+        parsed = json.loads(output)
+        assert parsed["message"] == f"fuzz {seed}"
+        assert "details" in parsed and "leaf" in parsed

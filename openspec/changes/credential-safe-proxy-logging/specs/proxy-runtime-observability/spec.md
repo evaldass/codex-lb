@@ -12,9 +12,10 @@ text. Structured extra keys MUST be redacted like values. Records at WARNING
 level or higher MUST additionally have keyed secrets (`password=`, `token=`,
 `api_key=`, bearer, basic and authorization values in any letter case, JSON
 secret fields embedded in strings, and structured extra fields whose key names
-a secret, whatever the value type) redacted. Redaction MUST never raise; on
-failure the record is
-emitted unchanged. Application startup MUST install an asyncio loop exception
+a secret, whatever the value type) redacted. Redaction MUST never raise: on
+failure the record is emitted unchanged, and structured extras that are cyclic,
+pathologically deep, or unprintable MUST still be emitted with redaction
+applied to every finite, printable part. Application startup MUST install an asyncio loop exception
 handler that redacts the `repr()` of context values before the default
 handler logs them, MUST leave secret-free context output byte-identical to
 the default handler, and MUST route `warnings.warn` output through the same
@@ -53,3 +54,10 @@ byte-identically to the unredacted rendering.
 
 - **WHEN** the redaction pattern raises while rendering a record
 - **THEN** the record is emitted with its original text
+
+#### Scenario: Cyclic or unprintable structured extras never drop the record
+
+- **GIVEN** a record carries an extra whose container refers back to itself, or whose `repr()` raises
+- **WHEN** the JSON formatter renders the record
+- **THEN** the record is emitted, the back-reference collapses to a `{...}` / `[...]` placeholder and the unprintable value to an `<unprintable ...>` marker
+- **AND** secret-keyed fields and URL userinfo in the finite part of the extra are still redacted
